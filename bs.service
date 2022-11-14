@@ -1,0 +1,9 @@
+[Unit]
+Description=Buffered Socket Server with support for WebSockets
+
+[Service]
+WorkingDirectory=/srv/bs
+ExecStart=/srv/bs/websocketserver.js
+
+[Install]
+WantedBy=multi-user.target
