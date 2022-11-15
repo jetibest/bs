@@ -2,3 +2,8 @@ tls/
 cache/
 node_modules/
 package-lock.json
+*.sock
+*.pem
+*.jwk
+*.key
+*.cert
