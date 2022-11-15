@@ -769,7 +769,7 @@ async function connect()
 	const net = require('net');
 	const tls = require('tls');
 	const crypto = require('crypto');
-	const ClassCryptoKey = !crypto.webcrypto ? require('@peculiar/webcrypto').CryptoKey : CryptoKey;
+	const ClassCryptoKey = crypto.webcrypto ? crypto.webcrypto.CryptoKey : require('@peculiar/webcrypto').CryptoKey;
 	const webcrypto = crypto.webcrypto || new (require('@peculiar/webcrypto').Crypto)(); // npm install @peculiar/webcrypto
 	const subtle = webcrypto.subtle;
 	
