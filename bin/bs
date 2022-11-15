@@ -76,7 +76,7 @@ const opts = {
 	listenSecure: true,
 	listenUnixDomainSocket: null,
 	listenProtocol: 'https',
-	listenHostname: '127.0.0.1',
+	listenHostname: '0.0.0.0',
 	listenPort: 6273,
 	listenKey: null,
 	listenCert: null,
@@ -153,7 +153,7 @@ const opts = {
 		}
 		if(arg === '--listen')
 		{
-			var listenAddress = parse_address(args[++i]);
+			var listenAddress = parse_address(args[++i] || '');
 			
 			opts.listen = true;
 			opts.listenProtocol = listenAddress.protocol || opts.listenProtocol;
@@ -608,32 +608,6 @@ async function listen()
 	                            socket.write('warning Invalid command (' + cmd + ')\n');
 	                        }
 	                        
-	                        if(pipe_read)
-	                        {
-	                            // write to socket whatever is new in the pipe_target...
-	                            // and asynchronously read from the file, and keep file open...
-	                            // file is clientpublickey/pipe_target/pipe_channel
-	                            var file = await get_store_path([clientPublicKeyHash, pipe_target, pipe_channel || 'default']);
-	                            
-	                            try
-	                            {
-	                                // pipe_read = fs.createReadStream(file, {flags: fs.constants.O_RDWR});
-	                                pipe_read = await fs.promises.open(file, fs.constants.O_RDWR); // also writing, so that it doesn't block
-	                                
-	                                keep_piping(pipe_read, file, socket, pipe_read_offset);
-	                            }
-	                            catch(err)
-	                            {
-	                                socket.write('error Not found (' + pipe_channel + ').\n');
-	                                
-	                                pipe_target = '';
-	                                pipe_channel = '';
-	                                pipe_read = false;
-	                                pipe_write = false;
-	                                pipe_read_offset = 0;
-	                            }
-	                        }
-	                        
 	                        if(pipe_write)
 	                        {
 	                            // file is pipe_target/clientpublickey/pipe_channel
@@ -646,6 +620,33 @@ async function listen()
 	                            
 	                            // open a write-stream to the file we want to write to
 	                            pipe_write = await fs.promises.open(file, 'a');
+								console.error('File appending to: ' + file);
+	                        }
+	                        
+	                        if(pipe_read)
+	                        {
+	                            // write to socket whatever is new in the pipe_target...
+	                            // and asynchronously read from the file, and keep file open...
+	                            // file is clientpublickey/pipe_target/pipe_channel
+	                            var file = await get_store_path([clientPublicKeyHash, pipe_target, pipe_channel || 'default']);
+	                            
+	                            try
+	                            {
+	                                // pipe_read = fs.createReadStream(file, {flags: fs.constants.O_RDWR});
+	                                pipe_read = await fs.promises.open(file, 'a+');//fs.constants.O_RDWR); // also writing, so that it doesn't block
+	                                
+	                                keep_piping(pipe_read, file, socket, pipe_read_offset);
+	                            }
+	                            catch(err)
+	                            {
+	                                socket.write('error ' + err.code + ' (' + (pipe_channel || 'default') + ').\n');
+	                                
+	                                pipe_target = '';
+	                                pipe_channel = '';
+	                                pipe_read = false;
+	                                pipe_write = false;
+	                                pipe_read_offset = 0;
+	                            }
 	                        }
 	                        
 	                        // stop line-by-line reading
@@ -692,8 +693,17 @@ async function listen()
 		const wss = new ws.WebSocketServer({
 			noServer: true
 		});
+		wss.on('error', function(err)
+		{
+			throw err;
+		});
 		wss.on('connection', function(ws)
 		{
+			ws.on('error', function(err)
+			{
+				console.error('WebSocket Server: Socket error:', err);
+			});
+			
 			console.error('WebSocket Server: Received connection.');
 			
 			var stream = websocketstream(ws, {
@@ -716,6 +726,10 @@ async function listen()
 			{
 				wss.emit('connection', ws, request);
 			});
+		});
+		httpserver.on('error', function(err)
+		{
+			throw err;
 		});
 		httpserver.on('listening', function()
 		{
@@ -744,14 +758,37 @@ async function listen()
 		
 		const tlsserver = tls.createServer({
 			cert: opts.listenCert,
-			key: opts.listenKey
+			key: opts.listenKey,
+			ALPNProtocols: ['http/1.1']
+		});
+		tlsserver.on('tlsClientError', function(err){ console.error(err); });
+		tlsserver.on('error', function(err){ throw err; });
+		tlsserver.on('connection', function()
+		{
+			// console.error('TLS Server: Received connection.');
 		});
 		tlsserver.on('secureConnection', function(socket)
 		{
-			console.error('TLS Server: Received secureConnection.');
-			var client = net.createConnection(server.address());
-			client.pipe(socket);
-			socket.pipe(client);
+			socket.on('error', function(err)
+			{
+				if(err.code === 'ECONNRESET') return socket.destroy(); // connections by haproxy
+				
+				console.error('TLS Server: Socket error:', err);
+			});
+			// console.error('TLS Server: Received secureConnection.');
+
+			// only forward connection when first data is received, to prevent busy connections by haproxy
+			var process_data = function(chunk)
+			{
+				socket.pause();
+				socket.off('data', process_data);
+				
+				var client = net.createConnection(server.address());
+				client.write(chunk);
+				client.pipe(socket);
+				socket.pipe(client);
+			};
+			socket.on('data', process_data);
 		});
 		tlsserver.on('listening', function()
 		{
@@ -929,6 +966,7 @@ async function connect()
 				if(!isConnected)
 				{
 					isConnected = true;
+					client.pause();
 					client.off('data', process_data);
 					
 					// now setup pipe with stdin/stdout for regular commands (list, read, write, open)
@@ -982,7 +1020,7 @@ async function connect()
 	
 	client.on('connect', function()
 	{
-		console.error('BufferedSocket Client: Connected to', isIPC ? clientOptions.path : client.address());
+		console.error('BufferedSocket Client: Connected to', isIPC ? clientOptions.path : (client.remoteAddress + ':' + client.remotePort));
 		client.write('pubkey ' + JSON.stringify(publicKeyJWK) + '\n');
 	});
 	client.on('data', process_data);

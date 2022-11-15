@@ -3,7 +3,7 @@ Description=Buffered Socket Server with support for WebSockets
 
 [Service]
 WorkingDirectory=/srv/bs
-ExecStart=/srv/bs/bin/bs --listen 0.0.0.0
+ExecStart=/srv/bs/bin/bs --listen
 
 [Install]
 WantedBy=multi-user.target
