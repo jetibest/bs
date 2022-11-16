@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
+// TODO: Implement WebRTC support for P2P connections.
+
 const fs = require('fs');
 
 const BUFFERED_SOCKET_SERVER_HELP = [
+		/*******************************************************************************/
 		'COMMANDS',
 		'',
 		' help,h',
@@ -39,22 +42,104 @@ const BUFFERED_SOCKET_SERVER_HELP = [
 	].join('\n') + '\n';
 
 const BUFFERED_SOCKET_CLI_HELP = [
+		/*******************************************************************************/
 		'USAGE',
-		' bs [OPTIONS] <address>  Connect to server/host',
+		' bs [OPTIONS] <CMD [OPTIONS...]>...',
+		'',
+		'',
+		'COMMANDS',
+		' listen [OPTIONS] <address>   Run server at given address. Defaults to ',
+		'                              0.0.0.0:6273',
+		' connect [OPTIONS] <address>  Connect to server at given address. Defaults to',
+		'                              localhost:6273',
+		'',
 		'',
 		'OPTIONS',
 		'',
-		' --help, -h              Show this help',
-		' --listen <address>      Run server at the given address',
+		'Note: Some options may also be separately used for individual commands.',
+		'',
+		' --help, -h, help        Show this help',
 		' --key <file>            Private RSA-key for client/server',
 		' --cert <file>           Certificate for server',
-		' --store <dir>           Directory to store data',
-		' --tls                   Use TLS',
-		' --no-tls                Do not use TLS (no secure line)',
-		' --ignore-cert           Always accept remote certificate, for testing only',
-		' --unix                  Use UNIX domain socket',
+		' --tls                   Use TLS. Overrides protocol.',
+		' --no-tls                Do not use TLS (no secure line). Overrides protocol.',
 		'',
-		' Note: --<opt> implies: --listen-<opt> --connect-<opt>',
+		'',
+		'LISTEN OPTIONS',
+		'',
+		' --store <dir>           Directory to store data',
+		' --unix,-U               Use UNIX domain socket',
+		'',
+		'',
+		'CONNECT OPTIONS',
+		'',
+		' --ignore-cert           Always accept remote certificate, for testing only',
+		'',
+		'',
+		'EXAMPLES',
+		'',
+		'Note: For convenience, capitalized names indicate the hash of the client\'s respective',
+		'public key.',
+		'',
+		' 1. Alice and Bob say hello to each other using Charles\' server.',
+		'',
+		'   charles.net> bs listen 0.0.0.0',
+		'',
+		'   alice.net> bs connect charles.net',
+		'   << hash ALICE',
+		'   >> open BOB hello',
+		'   >> Hello Bob, it is I, Alice!',
+		'   << Hi Alice, how are you?',
+		'   <> ...',
+		'',
+		'   bob.net> bs connect charles.net',
+		'   << hash BOB',
+		'   >> list',
+		'   << ALICE',
+		'   >> list ALICE',
+		'   << hello    27   1970-01-01T12:34:56',
+		'   >> open ALICE hello',
+		'   << Hello Bob, it is I, Alice!',
+		'   >> Hi Alice, how are you?',
+		'   <> ...',
+		'',
+		' 2. Alice and Bob say hello to each other using Alice\'s device.',
+		'',
+		'   alice.net> bs listen 0.0.0.0 connect localhost',
+		'   << hash ALICE',
+		'   >> open BOB hello',
+		'   << Hello Bob, it is I, Alice!',
+		'   << Hi Alice, how are you?',
+		'   <> ...',
+		'',
+		'   bob.net> bs connect alice.net',
+		'   << hash BOB',
+		'   >> list',
+		'   << ALICE',
+		'   >> list ALICE',
+		'   << hello    27   1970-01-02T12:34:56',
+		'   >> open ALICE hello',
+		'   << Hello Bob, it is I, Alice!',
+		'   >> Hi Alice, how are you?',
+		'   <> ...',
+		'',
+		' 3. Alice sends a file to Bob. Bob checks for messages, Bob views the file.',
+		'',
+		'   charles.net> bs listen 0.0.0.0',
+		'',
+		'   alice.net> cat flowers.jpg | bs connect charles.net write BOB suprise.jpg',
+		'',
+		'   bob.net> bs connect charles.net',
+		'   << hash BOB',
+		'   >> list',
+		'   << ALICE',
+		'   >> list ALICE',
+		'   << surprise.jpg   123456   1970-01-03T12:34:56',
+		'   bob.net> bs connect charles.net read ALICE surprise.jpg | imageviewer',
+		'',
+		'Note: Of course, charles.net can usually not be trusted. Therefore, any implementation',
+		'of a higher level protocol should include an appropriate security layer.',
+		'',
 		''
 	].join('\n') + '\n';
 
@@ -73,7 +158,7 @@ function parse_address(addr_str)
 
 const opts = {
 	listen: false,
-	listenSecure: true,
+	listenSecure: null,
 	listenUnixDomainSocket: null,
 	listenProtocol: 'https',
 	listenHostname: '0.0.0.0',
@@ -82,15 +167,18 @@ const opts = {
 	listenCert: null,
 	listenStorePath: 'cache',
 	connect: false,
-	connectSecure: true,
+	connectSecure: null,
 	connectRejectUnauthorized: true,
 	connectUnixDomainSocket: null,
 	connectProtocol: 'bss',
-	connectHostname: '127.0.0.1',
+	connectHostname: 'localhost',
 	connectPort: 6273,
+	connectServername: null,
 	connectKey: null
 };
 {
+	var args_scope = null;
+	var args_skip = false;
 	var args = process.argv.slice(2);
 	var i;
 	for(i=0;i<args.length;++i)
@@ -99,111 +187,145 @@ const opts = {
 		
 		if(arg === '--')
 		{
-			break;
-		}
-		if(arg === '-h' || arg === '--help' || arg === '-help')
-		{
-			process.stdout.write(BUFFERED_SOCKET_CLI_HELP);
-			process.exit(0);
-		}
-		if(arg === '--tls' || arg === '--listen-tls')
-		{
-			opts.listenSecure = true;
+			args_skip = true;
 			continue;
 		}
-		if(arg === '--tls' || arg === '--connect-tls')
+		if(!args_skip)
 		{
-			opts.connectSecure = true;
-			continue;
+			if(arg === 'listen')
+			{
+				args_scope = 'listen';
+				opts.listen = true;
+				continue;
+			}
+			if(arg === 'connect')
+			{
+				args_scope = 'connect';
+				opts.connect = true;
+				continue;
+			}
+			if(arg === '-h' || arg === '--help' || arg === 'help')
+			{
+				process.stdout.write(BUFFERED_SOCKET_CLI_HELP);
+				process.exit(0);
+			}
+			if(arg === '--tls')
+			{
+				if(args_scope === null || args_scope === 'listen')
+				{
+					opts.listenSecure = true;
+				}
+				if(args_scope === null || args_scope === 'connect')
+				{
+					opts.connectSecure = true;
+				}
+				continue;
+			}
+			if(arg === '--no-tls')
+			{
+				if(args_scope === null || args_scope === 'listen')
+				{
+					opts.listenSecure = false;
+				}
+				if(args_scope === null || args_scope === 'connect')
+				{
+					opts.connectSecure = false;
+				}
+				continue;
+			}
+			if(arg === '--ignore-cert')
+			{
+				if(args_scope === null || args_scope === 'connect')
+				{
+					opts.connectRejectUnauthorized = false;
+				}
+				continue;
+			}
+			if(arg === '--key')
+			{
+				var key = fs.readFileSync(args[++i]);
+				if(args_scope === null || args_scope === 'listen')
+				{
+					opts.listenKey = key;
+				}
+				if(args_scope === null || args_scope === 'connect')
+				{
+					opts.connectKey = key;
+				}
+				continue;
+			}
+			if(arg === '--cert')
+			{
+				var cert = fs.readFileSync(args[++i]);
+				if(args_scope === null || args_scope === 'listen')
+				{
+					opts.listenCert = cert;
+				}
+				continue;
+			}
+			if(arg === '--servername')
+			{
+				var servername = args[++i];
+				if(args_scope === null || args_scope === 'connect')
+				{
+					// required for SNI with TLSv1.3 when connecting to IP-address or IPC instead of a hostname
+					opts.connectServername = servername;
+				}
+				continue;
+			}
+			if(arg === '--store')
+			{
+				var store_path = args[++i];
+				if(args_scope === null || args_scope === 'listen')
+				{
+					opts.listenStorePath = store_path || opts.listenStorePath;
+				}
+				continue;
+			}
 		}
-		if(arg === '--no-tls' || arg === '--listen-no-tls')
+		
+		if(args_scope === 'listen')
 		{
-			opts.listenSecure = false;
-			continue;
-		}
-		if(arg === '--no-tls' || arg === '--connect-no-tls')
-		{
-			opts.connectSecure = false;
-			continue;
-		}
-		if(arg === '--ignore-cert' || arg === '--connect-ignore-cert')
-		{
-			opts.connectRejectUnauthorized = false;
-			continue;
-		}
-		if(arg === '--key')
-		{
-			opts.listenKey = opts.connectKey = fs.readFileSync(args[++i]);
-			continue;
-		}
-		else if(arg === '--listen-key')
-		{
-			opts.listenKey = fs.readFileSync(args[++i]);
-			continue;
-		}
-		else if(arg === '--connect-key')
-		{
-			opts.listenKey = fs.readFileSync(args[++i]);
-			continue;
-		}
-		if(arg === '--cert' || arg === '--listen-cert')
-		{
-			opts.listenCert = fs.readFileSync(args[++i]);
-			continue;
-		}
-		if(arg === '--listen')
-		{
-			var listenAddress = parse_address(args[++i] || '');
+			args_skip = false; // reset flag
 			
-			opts.listen = true;
+			var listenAddress = parse_address(arg);
 			opts.listenProtocol = listenAddress.protocol || opts.listenProtocol;
 			opts.listenHostname = listenAddress.hostname || opts.listenHostname;
 			opts.listenPort = parseInt(listenAddress.port) || opts.listenPort;
 			
-			// alias:
-			if(opts.listenProtocol === 'ws') opts.listenProtocol = 'http';
-			if(opts.listenProtocol === 'wss') opts.listenProtocol = 'https';
-			
 			// determine if secure protocol is enabled:
-			if(listenAddress.protocol)
+			if(listenAddress.protocol && opts.listenSecure === null)
 			{
-				opts.listenSecure = (opts.listenProtocol === 'https' || opts.listenProtocol === 'bss');
+				opts.listenSecure = (opts.listenProtocol === 'wss' || opts.listenProtocol === 'https' || opts.listenProtocol === 'bss');
 			}
+			
 			continue;
 		}
-		if(arg === '--store' || arg === '--listen-store')
+		if(args_scope === 'connect')
 		{
-			opts.listenStorePath = args[++i] || opts.listenStorePath;
-			continue;
-		}
-		
-		// no argument matched
-		break;
-	}
-	while(i < args.length)
-	{
-		var arg = args[i++];
-		
-		// if arg is address, then connect as client to this address
-		var addr = parse_address(arg);
-		if(addr)
-		{
-			opts.connect = true;
+			args_skip = false; // reset flag
+			
+			// if arg is address, then connect as client to this address
+			var addr = parse_address(arg);
 			opts.connectProtocol = addr.protocol || opts.connectProtocol;
 			opts.connectHostname = addr.hostname || opts.connectHostname;
 			opts.connectPort = parseInt(addr.port) || opts.connectPort;
 			
-			// alias:
-			if(opts.connectProtocol === 'ws') opts.connectProtocol = 'http';
-			if(opts.connectProtocol === 'wss') opts.connectProtocol = 'https';
-			
 			// determine if secure protocol is enabled:
-			if(addr.protocol)
+			if(addr.protocol && opts.connectSecure === null)
 			{
-				opts.connectSecure = (opts.connectProtocol === 'https' || opts.connectProtocol === 'bss');
+				opts.connectSecure = (opts.connectProtocol === 'wss' || opts.connectProtocol === 'https' || opts.connectProtocol === 'bss');
 			}
+			continue;
 		}
+		
+		// end of arguments detected, no argument matched
+		console.error('warning: Failed to match argument (' + arg + ').');
 	}
+	
+	// set default
+	if(opts.listenSecure === null) opts.listenSecure = true;
+	if(opts.connectSecure === null) opts.connectSecure = true;
 }
 
 async function listen()
@@ -402,7 +524,7 @@ async function listen()
 	                
 	                var line = rest.subarray(0, delimiterIndex).toString('utf8').trim();
 	                
-					if(opts.listenProtocol === 'http' || opts.listenProtocol === 'https')
+					if(opts.listenProtocol === 'http' || opts.listenProtocol === 'https' || opts.listenProtocol === 'ws' || opts.listenProtocol === 'wss')
 					{
 						if(line.startsWith('GET ') || line.startsWith('POST '))
 						{
@@ -688,7 +810,7 @@ async function listen()
 		});
 	}
 	
-	if(opts.listenProtocol === 'http' || opts.listenProtocol === 'https')
+	if(opts.listenProtocol === 'http' || opts.listenProtocol === 'https' || opts.listenProtocol === 'ws' || opts.listenProtocol === 'wss')
 	{
 		const wss = new ws.WebSocketServer({
 			noServer: true
@@ -721,11 +843,22 @@ async function listen()
 		});
 		httpserver.on('upgrade', function(request, socket, head)
 		{
-			console.error('HTTP Server: Client requesting upgrade to WebSocket Server.');
-			wss.handleUpgrade(request, socket, head, function(ws)
+			console.error(request.headers);
+			console.error(head);
+			if(request.headers['upgrade'] === 'bs')
 			{
-				wss.emit('connection', ws, request);
-			});
+				var client = net.createConnection(server.address());
+				client.pipe(socket);
+				socket.pipe(client);
+			}
+			else
+			{
+				console.error('HTTP Server: Client requesting upgrade to WebSocket Server.');
+				wss.handleUpgrade(request, socket, head, function(ws)
+				{
+					wss.emit('connection', ws, request);
+				});
+			}
 		});
 		httpserver.on('error', function(err)
 		{
@@ -978,7 +1111,7 @@ async function connect()
 			}
 			else
 			{
-				console.error('BufferedSocket Client: Warning, unknown command received from server (' + cmd + ').');
+				console.error('BufferedSocket Client: Warning, unknown command received from server (' + line + ').');
 			}
 		}
 	}
@@ -1008,12 +1141,26 @@ async function connect()
 	{
 		if(opts.connectSecure)
 		{
-			clientOptions.rejectUnauthorized = opts.connectRejectUnauthorized;
+			// enables mandatory (since TLSv1.3) SNI request, otherwise this might fail with bad or self-signed certificate
+			// the same host may have multiple domain names for which it has a certificate
+			// see also: https://github.com/nodejs/node/issues/28167
+			// this only makes sense if the servername is not an IP-address, but a hostname
+			if(opts.connectServername)
+			{
+				clientOptions.servername = opts.connectServername;
+			}
+			else if(!isIPC)
+			{
+				clientOptions.servername = opts.connectHostname;
+			}
 			
+			clientOptions.rejectUnauthorized = opts.connectRejectUnauthorized;
+			console.error('BufferedSocket Client: Connecting via TLS with:', clientOptions);
 			return tls.connect(clientOptions);
 		}
 		else
 		{
+			console.error('BufferedSocket Client: Connecting with:', clientOptions);
 			return net.connect(clientOptions);
 		}
 	})();
